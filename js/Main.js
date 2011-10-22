@@ -218,14 +218,17 @@ function createInstructions() {
 	element.appendChild( circle );
 
 	text = document.createElement( 'div' );
+    link = document.createElement( 'a' );
 	text.onSelectStart = null;
-	text.innerHTML = '<span style="color:' + theme[0] + ';font-size:40px;">Hey!</span><br /><br /><span style="font-size:15px; text-decoration:none;"><strong>Thanks for landing by</strong><br /><br />1. <a href="http://code.google.com/u/105503092261276074280/">Google Code</a><br />2. <a href="http://drupal.org/user/845142"> D.O. Profile</a><br />3. <a href="http://nitiniamme.wordpress.com">Blog</a><br />4. <a href="https://github.com/nmudgal">Github</a><br />5. <a href ="http://nmudgaldev.devcloud.acquia-sites.com">Dev Playground</a></span>';
+    link.setAttribute('href','blah');
+	text.innerHTML = '<span style="color:' + theme[0] + ';font-size:40px;">Hey!</span><br /><br /><span style="font-size:15px;"><strong>Thanks for landing by</strong><br /><br />1. <a href="http://code.google.com/u/105503092261276074280/">Google Code</a><br />2. <a href="http://drupal.org/user/845142"> D.O. Profile</a><br />3. <a href="http://nitiniamme.wordpress.com">Blog</a><br />4. <a href="https://github.com/nmudgal">Github</a><br />5. <a href ="http://nmudgaldev.devcloud.acquia-sites.com">Dev Playground</a></span>';
 	text.style.color = theme[1];
 	text.style.position = 'absolute';
 	text.style.left = '0px';
 	text.style.top = '0px';
 	text.style.fontFamily = 'Georgia';
 	text.style.textAlign = 'center';
+    element.appendChild(link);
 	element.appendChild(text);
 
 	text.style.left = ((250 - text.clientWidth) / 2) +'px';
