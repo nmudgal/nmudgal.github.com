@@ -1,515 +1,470 @@
-var canvas;
+(function () {
+	"use strict";
 
-var delta = [ 0, 0 ];
-var stage = [ window.screenX, window.screenY, window.innerWidth, window.innerHeight ];
-getBrowserDimensions();
+	var canvas = document.getElementById("constellation");
+	var identity = document.getElementById("identity");
+	var remixButton = document.getElementById("remix");
+	var remixStatus = document.getElementById("remix-status");
+	var context = canvas.getContext("2d", { alpha: true });
+	var motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+	var isReducedMotion = motionQuery.matches;
+	var seed = 845142;
+	var animationFrame = 0;
+	var resizeFrame = 0;
+	var lastFrameTime = 0;
+	var viewport = { width: 0, height: 0, pixelRatio: 1 };
+	var orbBodies = [];
+	var boundaries = [];
+	var identityObstacle = null;
+	var remixObstacle = null;
+	var mouseConstraint = null;
 
-var themes = [ [ "#10222B", "#95AB63", "#BDD684", "#E2F0D6", "#F6FFE0" ],
-		[ "#362C2A", "#732420", "#BF734C", "#FAD9A0", "#736859" ],
-		[ "#0D1114", "#102C2E", "#695F4C", "#EBBC5E", "#FFFBB8" ],
-		[ "#2E2F38", "#FFD63E", "#FFB54B", "#E88638", "#8A221C" ],
-		[ "#121212", "#E6F2DA", "#C9F24B", "#4D7B85", "#23383D" ],
-		[ "#343F40", "#736751", "#F2D7B6", "#BFAC95", "#8C3F3F" ],
-		[ "#000000", "#2D2B2A", "#561812", "#B81111", "#FFFFFF" ],
-		[ "#333B3A", "#B4BD51", "#543B38", "#61594D", "#B8925A" ] ];
-var theme;
+	var palette = {
+		mist: "#DCE6E2",
+		ink: "#102D2E",
+		signal: "#EF5A3C",
+		iris: "#6657D9",
+		chalk: "#F7F5EF"
+	};
 
-var worldAABB, world, iterations = 1, timeStep = 1 / 20;
+	if (!window.Matter || !context) {
+		document.documentElement.classList.add("no-motion");
+		remixButton.hidden = true;
+		return;
+	}
 
-var walls = [];
-var wall_thickness = 200;
-var wallsSetted = false;
+	var Engine = Matter.Engine;
+	var Bodies = Matter.Bodies;
+	var Body = Matter.Body;
+	var Composite = Matter.Composite;
+	var Events = Matter.Events;
+	var Mouse = Matter.Mouse;
+	var MouseConstraint = Matter.MouseConstraint;
+	var engine = Engine.create({
+		enableSleeping: true,
+		positionIterations: 7,
+		velocityIterations: 5,
+		constraintIterations: 2,
+		gravity: { x: 0, y: 0.42, scale: 0.001 }
+	});
 
-var bodies, elements, text;
+	function seededRandom() {
+		seed |= 0;
+		seed = (seed + 0x6d2b79f5) | 0;
+		var value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+		value = value + Math.imul(value ^ (value >>> 7), 61 | value) ^ value;
+		return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+	}
 
-var createMode = false;
-var destroyMode = false;
+	function clamp(value, minimum, maximum) {
+		return Math.min(Math.max(value, minimum), maximum);
+	}
 
-var isMouseDown = false;
-var mouseJoint;
-var mouse = { x: 0, y: 0 };
-var gravity = { x: 0, y: 1 };
+	function sceneMetrics() {
+		if (viewport.height <= 540 && viewport.width > viewport.height) {
+			return { count: 7, minimumRadius: 12, maximumRadius: 28 };
+		}
 
-var PI2 = Math.PI * 2;
+		if (viewport.width <= 600) {
+			return { count: 12, minimumRadius: 18, maximumRadius: 47 };
+		}
 
-var timeOfLastTouch = 0;
+		if (viewport.width <= 960) {
+			return { count: 14, minimumRadius: 22, maximumRadius: 58 };
+		}
 
-init();
-play();
+		return { count: 18, minimumRadius: 26, maximumRadius: 76 };
+	}
 
-function init() {
+	function elementRect(element, padding) {
+		var rect = element.getBoundingClientRect();
 
-	canvas = document.getElementById( 'canvas' );
+		return {
+			left: clamp(rect.left - padding, 0, viewport.width),
+			top: clamp(rect.top - padding, 0, viewport.height),
+			right: clamp(rect.right + padding, 0, viewport.width),
+			bottom: clamp(rect.bottom + padding, 0, viewport.height)
+		};
+	}
 
-	document.onmousedown = onDocumentMouseDown;
-	document.onmouseup = onDocumentMouseUp;
-	document.onmousemove = onDocumentMouseMove;
-	document.ondblclick = onDocumentDoubleClick;
+	function identityRect() {
+		return elementRect(identity, viewport.width <= 700 ? 20 : 34);
+	}
 
-	document.addEventListener( 'touchstart', onDocumentTouchStart, false );
-	document.addEventListener( 'touchmove', onDocumentTouchMove, false );
-	document.addEventListener( 'touchend', onDocumentTouchEnd, false );
+	function remixRect() {
+		return elementRect(remixButton, 14);
+	}
 
-	window.addEventListener( 'deviceorientation', onWindowDeviceOrientation, false );
+	function isOutsideProtectedArea(x, y, radius, rect) {
+		return (
+			x + radius < rect.left ||
+			x - radius > rect.right ||
+			y + radius < rect.top ||
+			y - radius > rect.bottom
+		);
+	}
 
-	// init box2d
+	function findSpawnPoint(radius, identitySafeZone, remixSafeZone) {
+		var margin = radius + 8;
+		var x = margin;
+		var y = margin;
 
-	worldAABB = new b2AABB();
-	worldAABB.minVertex.Set( -200, -200 );
-	worldAABB.maxVertex.Set( window.innerWidth + 200, window.innerHeight + 200 );
+		for (var attempt = 0; attempt < 96; attempt += 1) {
+			x = margin + seededRandom() * Math.max(1, viewport.width - margin * 2);
+			y = margin + seededRandom() * Math.max(1, viewport.height - margin * 2);
 
-	world = new b2World( worldAABB, new b2Vec2( 0, 0 ), true );
+			if (
+				isOutsideProtectedArea(x, y, radius + 10, identitySafeZone) &&
+				isOutsideProtectedArea(x, y, radius + 10, remixSafeZone)
+			) {
+				break;
+			}
+		}
 
-	setWalls();
-	reset();
-}
+		return { x: x, y: y };
+	}
 
+	function createBoundaries() {
+		var thickness = 120;
+		var common = {
+			isStatic: true,
+			render: { visible: false },
+			label: "boundary"
+		};
 
-function play() {
+		boundaries = [
+			Bodies.rectangle(viewport.width / 2, -thickness / 2, viewport.width + thickness * 2, thickness, common),
+			Bodies.rectangle(viewport.width / 2, viewport.height + thickness / 2, viewport.width + thickness * 2, thickness, common),
+			Bodies.rectangle(-thickness / 2, viewport.height / 2, thickness, viewport.height + thickness * 2, common),
+			Bodies.rectangle(viewport.width + thickness / 2, viewport.height / 2, thickness, viewport.height + thickness * 2, common)
+		];
 
-	setInterval( loop, 1000 / 40 );
-}
+		Composite.add(engine.world, boundaries);
+	}
 
-function reset() {
+	function createObstacle(rect, label) {
+		var width = Math.max(1, rect.right - rect.left);
+		var height = Math.max(1, rect.bottom - rect.top);
 
-	var i;
+		return Bodies.rectangle(
+			rect.left + width / 2,
+			rect.top + height / 2,
+			width,
+			height,
+			{
+				isStatic: true,
+				render: { visible: false },
+				label: label
+			}
+		);
+	}
 
-	if ( bodies ) {
+	function createOrbs() {
+		var metrics = sceneMetrics();
+		var identitySafeZone = identityRect();
+		var remixSafeZone = remixRect();
+		var colorPairs = [
+			[palette.signal, palette.chalk, palette.ink],
+			[palette.iris, palette.chalk, palette.ink],
+			[palette.ink, palette.mist, palette.signal],
+			[palette.chalk, palette.ink, palette.iris],
+			[palette.signal, palette.ink, palette.chalk]
+		];
 
-		for ( i = 0; i < bodies.length; i++ ) {
+		for (var index = 0; index < metrics.count; index += 1) {
+			var radius = metrics.minimumRadius + seededRandom() * (metrics.maximumRadius - metrics.minimumRadius);
+			var point = findSpawnPoint(radius, identitySafeZone, remixSafeZone);
+			var body = Bodies.circle(point.x, point.y, radius, {
+				density: 0.0012,
+				friction: 0.05,
+				frictionAir: 0.022,
+				restitution: 0.72,
+				render: { visible: false },
+				label: "orb"
+			});
 
-			var body = bodies[ i ]
-			canvas.removeChild( body.GetUserData().element );
-			world.DestroyBody( body );
-			body = null;
+			body.plugin.constellation = {
+				pattern: index % 5,
+				colors: colorPairs[index % colorPairs.length]
+			};
+
+			if (!isReducedMotion) {
+				Body.setVelocity(body, {
+					x: (seededRandom() - 0.5) * 2.6,
+					y: (seededRandom() - 0.5) * 1.8
+				});
+				Body.setAngularVelocity(body, (seededRandom() - 0.5) * 0.035);
+			}
+
+			orbBodies.push(body);
+		}
+
+		Composite.add(engine.world, orbBodies);
+	}
+
+	function drawConcentricOrb(radius, colors) {
+		for (var ring = 0; ring < 4; ring += 1) {
+			context.beginPath();
+			context.arc(0, 0, radius * (1 - ring * 0.22), 0, Math.PI * 2);
+			context.fillStyle = colors[ring % colors.length];
+			context.fill();
 		}
 	}
 
-	// color theme
-	theme = themes[ Math.random() * themes.length >> 0 ];
-	document.body.style[ 'backgroundColor' ] = theme[ 0 ];
+	function drawTargetOrb(radius, colors) {
+		context.fillStyle = colors[0];
+		context.beginPath();
+		context.arc(0, 0, radius, 0, Math.PI * 2);
+		context.fill();
 
-	bodies = [];
-	elements = [];
-
-	createInstructions();
-
-	for( i = 0; i < 10; i++ ) {
-
-		createBall();
-
+		context.lineWidth = Math.max(3, radius * 0.08);
+		context.strokeStyle = colors[1];
+		for (var ring = 0.58; ring >= 0.22; ring -= 0.18) {
+			context.beginPath();
+			context.arc(0, 0, radius * ring, 0, Math.PI * 2);
+			context.stroke();
+		}
 	}
 
-}
+	function drawOffsetOrb(radius, colors) {
+		context.fillStyle = colors[0];
+		context.beginPath();
+		context.arc(0, 0, radius, 0, Math.PI * 2);
+		context.fill();
 
-//
+		context.fillStyle = colors[1];
+		context.beginPath();
+		context.arc(radius * 0.22, -radius * 0.18, radius * 0.42, 0, Math.PI * 2);
+		context.fill();
 
-function onDocumentMouseDown() {
+		context.fillStyle = colors[2];
+		context.beginPath();
+		context.arc(radius * 0.22, -radius * 0.18, radius * 0.13, 0, Math.PI * 2);
+		context.fill();
+	}
 
-	isMouseDown = true;
-	return false;
-}
+	function drawSplitOrb(radius, colors) {
+		context.fillStyle = colors[0];
+		context.beginPath();
+		context.arc(0, 0, radius, 0, Math.PI * 2);
+		context.fill();
 
-function onDocumentMouseUp() {
+		context.fillStyle = colors[1];
+		context.beginPath();
+		context.arc(0, 0, radius * 0.64, Math.PI * -0.5, Math.PI * 0.5);
+		context.lineTo(0, -radius * 0.64);
+		context.fill();
 
-	isMouseDown = false;
-	return false;
-}
+		context.fillStyle = colors[2];
+		context.beginPath();
+		context.arc(0, 0, radius * 0.17, 0, Math.PI * 2);
+		context.fill();
+	}
 
-function onDocumentMouseMove( event ) {
+	function drawOrbitOrb(radius, colors) {
+		context.fillStyle = colors[0];
+		context.beginPath();
+		context.arc(0, 0, radius, 0, Math.PI * 2);
+		context.fill();
 
-	mouse.x = event.clientX;
-	mouse.y = event.clientY;
-}
+		context.strokeStyle = colors[1];
+		context.lineWidth = Math.max(2, radius * 0.07);
+		context.beginPath();
+		context.arc(0, 0, radius * 0.58, 0, Math.PI * 2);
+		context.stroke();
 
-function onDocumentDoubleClick() {
+		context.fillStyle = colors[2];
+		context.beginPath();
+		context.arc(radius * 0.58, 0, radius * 0.13, 0, Math.PI * 2);
+		context.fill();
+	}
 
-	reset();
-}
+	function drawOrb(body) {
+		var visual = body.plugin.constellation;
+		var radius = body.circleRadius;
 
-function onDocumentTouchStart( event ) {
+		context.save();
+		context.translate(body.position.x, body.position.y);
+		context.rotate(body.angle);
 
-	if( event.touches.length == 1 ) {
+		switch (visual.pattern) {
+			case 0:
+				drawConcentricOrb(radius, visual.colors);
+				break;
+			case 1:
+				drawTargetOrb(radius, visual.colors);
+				break;
+			case 2:
+				drawOffsetOrb(radius, visual.colors);
+				break;
+			case 3:
+				drawSplitOrb(radius, visual.colors);
+				break;
+			default:
+				drawOrbitOrb(radius, visual.colors);
+		}
 
-		event.preventDefault();
+		context.restore();
+	}
 
-		// Faking double click for touch devices
+	function renderScene() {
+		context.setTransform(viewport.pixelRatio, 0, 0, viewport.pixelRatio, 0, 0);
+		context.clearRect(0, 0, viewport.width, viewport.height);
 
-		var now = new Date().getTime();
+		for (var index = 0; index < orbBodies.length; index += 1) {
+			drawOrb(orbBodies[index]);
+		}
+	}
 
-		if ( now - timeOfLastTouch  < 250 ) {
+	function stopAnimation() {
+		if (animationFrame) {
+			window.cancelAnimationFrame(animationFrame);
+			animationFrame = 0;
+		}
+	}
 
-			reset();
+	function animate(time) {
+		if (document.hidden || isReducedMotion) {
+			stopAnimation();
 			return;
 		}
 
-		timeOfLastTouch = now;
+		var elapsed = lastFrameTime ? time - lastFrameTime : 1000 / 60;
+		lastFrameTime = time;
+		Engine.update(engine, clamp(elapsed, 1000 / 120, 1000 / 60));
+		renderScene();
 
-		mouse.x = event.touches[ 0 ].pageX;
-		mouse.y = event.touches[ 0 ].pageY;
-		isMouseDown = true;
-	}
-}
-
-function onDocumentTouchMove( event ) {
-
-	if ( event.touches.length == 1 ) {
-
-		event.preventDefault();
-
-		mouse.x = event.touches[ 0 ].pageX;
-		mouse.y = event.touches[ 0 ].pageY;
-
-	}
-
-}
-
-function onDocumentTouchEnd( event ) {
-
-	if ( event.touches.length == 0 ) {
-
-		event.preventDefault();
-		isMouseDown = false;
-
-	}
-
-}
-
-function onWindowDeviceOrientation( event ) {
-
-	if ( event.beta ) {
-
-		gravity.x = Math.sin( event.gamma * Math.PI / 180 );
-		gravity.y = Math.sin( ( Math.PI / 4 ) + event.beta * Math.PI / 180 );
-
-	}
-
-}
-
-//
-
-function createInstructions() {
-
-	var size = 250;
-
-	var element = document.createElement( 'div' );
-	element.width = size;
-	element.height = size;	
-	element.style.position = 'absolute';
-	element.style.left = -200 + 'px';
-	element.style.top = -200 + 'px';
-	element.style.cursor = "default";
-
-	canvas.appendChild(element);
-	elements.push( element );
-
-	var circle = document.createElement( 'canvas' );
-	circle.width = size;
-	circle.height = size;
-
-	var graphics = circle.getContext( '2d' );
-
-	graphics.fillStyle = theme[ 3 ];
-	graphics.beginPath();
-	graphics.arc( size * .5, size * .5, size * .5, 0, PI2, true );
-	graphics.closePath();
-	graphics.fill();
-
-	element.appendChild( circle );
-
-	text = document.createElement( 'div' );
-	text.onSelectStart = null;
-	text.innerHTML = '<span style="color:' + theme[0] + ';font-size:40px;">Hey!</span><br /><br /><span style="font-size:15px;"><strong>Thanks for landing by</strong><br /><br />1. <a href="http://code.google.com/u/105503092261276074280/">Google Code</a><br />2. <a href="http://drupal.org/user/845142"> D.O. Profile</a><br />3. <a href="http://nitiniamme.wordpress.com">Blog</a><br />4. <a href="https://github.com/nmudgal">Github</a><br />5. <a href ="http://nmudgaldev.devcloud.acquia-sites.com">Dev Playground</a></span>';
-	text.style.color = theme[1];
-	text.style.position = 'absolute';
-	text.style.left = '0px';
-	text.style.top = '0px';
-	text.style.fontFamily = 'Georgia';
-	text.style.textAlign = 'center';
-	element.appendChild(text);
-
-	text.style.left = ((250 - text.clientWidth) / 2) +'px';
-	text.style.top = ((250 - text.clientHeight) / 2) +'px';	
-
-	var b2body = new b2BodyDef();
-
-	var circle = new b2CircleDef();
-	circle.radius = size / 2;
-	circle.density = 1;
-	circle.friction = 0.3;
-	circle.restitution = 0.3;
-	b2body.AddShape(circle);
-	b2body.userData = {element: element};
-
-	b2body.position.Set( Math.random() * stage[2], Math.random() * -200 );
-	b2body.linearVelocity.Set( Math.random() * 400 - 200, Math.random() * 400 - 200 );
-	bodies.push( world.CreateBody(b2body) );	
-}
-
-function createBall( x, y ) {
-
-	var x = x || Math.random() * stage[2];
-	var y = y || Math.random() * -200;
-
-	var size = (Math.random() * 100 >> 0) + 20;
-
-	var element = document.createElement("canvas");
-	element.width = size;
-	element.height = size;
-	element.style['position'] = 'absolute';
-	element.style['left'] = -200 + 'px';
-	element.style['top'] = -200 + 'px';
-
-	var graphics = element.getContext("2d");
-
-	var num_circles = Math.random() * 10 >> 0;
-
-	for (var i = size; i > 0; i-= (size/num_circles)) {
-
-		graphics.fillStyle = theme[ (Math.random() * 4 >> 0) + 1];
-		graphics.beginPath();
-		graphics.arc(size * .5, size * .5, i * .5, 0, PI2, true); 
-		graphics.closePath();
-		graphics.fill();
-	}
-
-	canvas.appendChild(element);
-
-	elements.push( element );
-
-	var b2body = new b2BodyDef();
-
-	var circle = new b2CircleDef();
-	circle.radius = size >> 1;
-	circle.density = 1;
-	circle.friction = 0.3;
-	circle.restitution = 0.3;
-	b2body.AddShape(circle);
-	b2body.userData = {element: element};
-
-	b2body.position.Set( x, y );
-	b2body.linearVelocity.Set( Math.random() * 400 - 200, Math.random() * 400 - 200 );
-	bodies.push( world.CreateBody(b2body) );
-}
-
-//
-
-function loop() {
-
-	if (getBrowserDimensions()) {
-
-		setWalls();
-
-	}
-
-	delta[0] += (0 - delta[0]) * .5;
-	delta[1] += (0 - delta[1]) * .5;
-
-	world.m_gravity.x = gravity.x * 350 + delta[0];
-	world.m_gravity.y = gravity.y * 350 + delta[1];
-
-	mouseDrag();
-	world.Step(timeStep, iterations);
-
-	for (i = 0; i < bodies.length; i++) {
-
-		var body = bodies[i];
-		var element = elements[i];
-
-		element.style.left = (body.m_position0.x - (element.width >> 1)) + 'px';
-		element.style.top = (body.m_position0.y - (element.height >> 1)) + 'px';
-
-		if (element.tagName == 'DIV') {
-
-			var rotationStyle = 'rotate(' + (body.m_rotation0 * 57.2957795) + 'deg)';
-			text.style.WebkitTransform = rotationStyle;
-			text.style.MozTransform = rotationStyle;
-			text.style.OTransform = rotationStyle;
-			text.style.msTransform = rotationStyle;
-
+		if (orbBodies.length && orbBodies.every(function (body) { return body.isSleeping; })) {
+			stopAnimation();
+			return;
 		}
 
+		animationFrame = window.requestAnimationFrame(animate);
 	}
 
-}
-
-
-// .. BOX2D UTILS
-
-function createBox(world, x, y, width, height, fixed) {
-
-	if (typeof(fixed) == 'undefined') {
-
-		fixed = true;
-
-	}
-
-	var boxSd = new b2BoxDef();
-
-	if (!fixed) {
-
-		boxSd.density = 1.0;
-
-	}
-
-	boxSd.extents.Set(width, height);
-
-	var boxBd = new b2BodyDef();
-	boxBd.AddShape(boxSd);
-	boxBd.position.Set(x,y);
-
-	return world.CreateBody(boxBd);
-
-}
-
-function mouseDrag()
-{
-	// mouse press
-	if (createMode) {
-
-		createBall( mouse.x, mouse.y );
-
-	} else if (isMouseDown && !mouseJoint) {
-
-		var body = getBodyAtMouse();
-
-		if (body) {
-
-			var md = new b2MouseJointDef();
-			md.body1 = world.m_groundBody;
-			md.body2 = body;
-			md.target.Set(mouse.x, mouse.y);
-			md.maxForce = 30000 * body.m_mass;
-			md.timeStep = timeStep;
-			mouseJoint = world.CreateJoint(md);
-			body.WakeUp();
-
-		} else {
-
-			createMode = true;
-
+	function startAnimation() {
+		if (animationFrame || document.hidden || isReducedMotion) {
+			return;
 		}
 
+		lastFrameTime = 0;
+		animationFrame = window.requestAnimationFrame(animate);
 	}
 
-	// mouse release
-	if (!isMouseDown) {
+	function removeBodies(bodies) {
+		for (var index = 0; index < bodies.length; index += 1) {
+			Composite.remove(engine.world, bodies[index]);
+		}
+	}
 
-		createMode = false;
-		destroyMode = false;
+	function removeSceneBodies() {
+		removeBodies(orbBodies);
+		removeBodies(boundaries);
 
-		if (mouseJoint) {
-
-			world.DestroyJoint(mouseJoint);
-			mouseJoint = null;
-
+		if (identityObstacle) {
+			Composite.remove(engine.world, identityObstacle);
 		}
 
+		if (remixObstacle) {
+			Composite.remove(engine.world, remixObstacle);
+		}
+
+		orbBodies = [];
+		boundaries = [];
+		identityObstacle = null;
+		remixObstacle = null;
 	}
 
-	// mouse move
-	if (mouseJoint) {
-
-		var p2 = new b2Vec2(mouse.x, mouse.y);
-		mouseJoint.SetTarget(p2);
+	function rebuildScene() {
+		removeSceneBodies();
+		createBoundaries();
+		identityObstacle = createObstacle(identityRect(), "identity-obstacle");
+		remixObstacle = createObstacle(remixRect(), "remix-obstacle");
+		Composite.add(engine.world, [identityObstacle, remixObstacle]);
+		createOrbs();
+		renderScene();
+		startAnimation();
 	}
-}
 
-function getBodyAtMouse() {
+	function syncViewport() {
+		resizeFrame = 0;
+		viewport.width = window.innerWidth;
+		viewport.height = window.innerHeight;
+		viewport.pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
 
-	// Make a small box.
-	var mousePVec = new b2Vec2();
-	mousePVec.Set(mouse.x, mouse.y);
+		canvas.width = Math.round(viewport.width * viewport.pixelRatio);
+		canvas.height = Math.round(viewport.height * viewport.pixelRatio);
+		canvas.style.width = viewport.width + "px";
+		canvas.style.height = viewport.height + "px";
 
-	var aabb = new b2AABB();
-	aabb.minVertex.Set(mouse.x - 1, mouse.y - 1);
-	aabb.maxVertex.Set(mouse.x + 1, mouse.y + 1);
+		if (mouseConstraint) {
+			mouseConstraint.mouse.pixelRatio = viewport.pixelRatio;
+		}
 
-	// Query the world for overlapping shapes.
-	var k_maxCount = 10;
-	var shapes = new Array();
-	var count = world.Query(aabb, shapes, k_maxCount);
-	var body = null;
+		rebuildScene();
+	}
 
-	for (var i = 0; i < count; ++i) {
+	function scheduleViewportSync() {
+		if (!resizeFrame) {
+			resizeFrame = window.requestAnimationFrame(syncViewport);
+		}
+	}
 
-		if (shapes[i].m_body.IsStatic() == false) {
-
-			if ( shapes[i].TestPoint(mousePVec) ) {
-
-				body = shapes[i].m_body;
-				break;
-
+	function configureMouseConstraint() {
+		var mouse = Mouse.create(canvas);
+		mouse.pixelRatio = viewport.pixelRatio;
+		mouseConstraint = MouseConstraint.create(engine, {
+			mouse: mouse,
+			constraint: {
+				stiffness: 0.18,
+				damping: 0.16,
+				render: { visible: false }
 			}
+		});
 
+		Composite.add(engine.world, mouseConstraint);
+		Events.on(mouseConstraint, "startdrag", function () {
+			document.body.classList.add("is-dragging");
+		});
+		Events.on(mouseConstraint, "enddrag", function () {
+			document.body.classList.remove("is-dragging");
+		});
+	}
+
+	function handleRemix() {
+		seed = (seed + 1009) | 0;
+		rebuildScene();
+		remixStatus.textContent = "Constellation remixed.";
+	}
+
+	function handleVisibilityChange() {
+		if (document.hidden) {
+			stopAnimation();
+		} else {
+			startAnimation();
 		}
-
 	}
 
-	return body;
-
-}
-
-function setWalls() {
-
-	if (wallsSetted) {
-
-		world.DestroyBody(walls[0]);
-		world.DestroyBody(walls[1]);
-		world.DestroyBody(walls[2]);
-		world.DestroyBody(walls[3]);
-
-		walls[0] = null; 
-		walls[1] = null;
-		walls[2] = null;
-		walls[3] = null;
+	function handleMotionPreference(event) {
+		isReducedMotion = event.matches;
+		document.documentElement.classList.toggle("reduced-motion", isReducedMotion);
+		stopAnimation();
+		rebuildScene();
 	}
 
-	walls[0] = createBox(world, stage[2] / 2, - wall_thickness, stage[2], wall_thickness);
-	walls[1] = createBox(world, stage[2] / 2, stage[3] + wall_thickness, stage[2], wall_thickness);
-	walls[2] = createBox(world, - wall_thickness, stage[3] / 2, wall_thickness, stage[3]);
-	walls[3] = createBox(world, stage[2] + wall_thickness, stage[3] / 2, wall_thickness, stage[3]);	
+	document.documentElement.classList.toggle("reduced-motion", isReducedMotion);
+	configureMouseConstraint();
+	syncViewport();
 
-	wallsSetted = true;
+	remixButton.addEventListener("click", handleRemix);
+	canvas.addEventListener("pointerdown", startAnimation, { passive: true });
+	document.addEventListener("visibilitychange", handleVisibilityChange);
+	window.addEventListener("resize", scheduleViewportSync, { passive: true });
+	new ResizeObserver(scheduleViewportSync).observe(identity);
 
-}
-
-// BROWSER DIMENSIONS
-
-function getBrowserDimensions() {
-
-	var changed = false;
-
-	if (stage[0] != window.screenX) {
-
-		delta[0] = (window.screenX - stage[0]) * 50;
-		stage[0] = window.screenX;
-		changed = true;
-
+	if (motionQuery.addEventListener) {
+		motionQuery.addEventListener("change", handleMotionPreference);
+	} else {
+		motionQuery.addListener(handleMotionPreference);
 	}
-
-	if (stage[1] != window.screenY) {
-
-		delta[1] = (window.screenY - stage[1]) * 50;
-		stage[1] = window.screenY;
-		changed = true;
-
-	}
-
-	if (stage[2] != window.innerWidth) {
-
-		stage[2] = window.innerWidth;
-		changed = true;
-
-	}
-
-	if (stage[3] != window.innerHeight) {
-
-		stage[3] = window.innerHeight;
-		changed = true;
-
-	}
-
-	return changed;
-
-}
+})();
