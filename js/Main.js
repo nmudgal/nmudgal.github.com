@@ -1,470 +1,531 @@
 (function () {
 	"use strict";
 
-	var canvas = document.getElementById("constellation");
-	var identity = document.getElementById("identity");
-	var remixButton = document.getElementById("remix");
-	var remixStatus = document.getElementById("remix-status");
-	var context = canvas.getContext("2d", { alpha: true });
+	var stage = document.getElementById("kinetic-stage");
+	var canvas = document.getElementById("force-field");
+	var button = document.getElementById("rebalance");
+	var status = document.getElementById("rebalance-status");
+	var context = canvas && canvas.getContext("2d", { alpha: true });
 	var motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-	var isReducedMotion = motionQuery.matches;
+	var reducedMotion = motionQuery.matches;
 	var seed = 845142;
-	var animationFrame = 0;
+	var randomState = seed;
+	var viewport = { width: 0, height: 0, ratio: 1 };
+	var core = { x: 0, y: 0, radius: 50 };
+	var bodies = [];
+	var frame = 0;
 	var resizeFrame = 0;
-	var lastFrameTime = 0;
-	var viewport = { width: 0, height: 0, pixelRatio: 1 };
-	var orbBodies = [];
-	var boundaries = [];
-	var identityObstacle = null;
-	var remixObstacle = null;
-	var mouseConstraint = null;
-
+	var lastTime = 0;
+	var settledFrames = 0;
+	var dragged = null;
+	var pointer = { x: 0, y: 0, previousX: 0, previousY: 0 };
 	var palette = {
-		mist: "#DCE6E2",
-		ink: "#102D2E",
-		signal: "#EF5A3C",
-		iris: "#6657D9",
-		chalk: "#F7F5EF"
+		frost: "#E9EFEC",
+		carbon: "#132220",
+		cobalt: "#3457D5",
+		orange: "#FF5A36",
+		yellow: "#D7E85C",
+		chalk: "#FBFCF8"
 	};
 
-	if (!window.Matter || !context) {
-		document.documentElement.classList.add("no-motion");
-		remixButton.hidden = true;
+	if (!stage || !canvas || !button || !context) {
+		document.documentElement.classList.add("no-canvas");
+		if (button) button.hidden = true;
 		return;
-	}
-
-	var Engine = Matter.Engine;
-	var Bodies = Matter.Bodies;
-	var Body = Matter.Body;
-	var Composite = Matter.Composite;
-	var Events = Matter.Events;
-	var Mouse = Matter.Mouse;
-	var MouseConstraint = Matter.MouseConstraint;
-	var engine = Engine.create({
-		enableSleeping: true,
-		positionIterations: 7,
-		velocityIterations: 5,
-		constraintIterations: 2,
-		gravity: { x: 0, y: 0.42, scale: 0.001 }
-	});
-
-	function seededRandom() {
-		seed |= 0;
-		seed = (seed + 0x6d2b79f5) | 0;
-		var value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-		value = value + Math.imul(value ^ (value >>> 7), 61 | value) ^ value;
-		return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
 	}
 
 	function clamp(value, minimum, maximum) {
 		return Math.min(Math.max(value, minimum), maximum);
 	}
 
-	function sceneMetrics() {
-		if (viewport.height <= 540 && viewport.width > viewport.height) {
-			return { count: 7, minimumRadius: 12, maximumRadius: 28 };
+	function random() {
+		randomState |= 0;
+		randomState = (randomState + 0x6d2b79f5) | 0;
+		var value = Math.imul(randomState ^ (randomState >>> 15), 1 | randomState);
+		value = value + Math.imul(value ^ (value >>> 7), 61 | value) ^ value;
+		return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+	}
+
+	function sceneCount() {
+		if (viewport.width < 520) return 7;
+		if (viewport.width < 900) return 8;
+		return 9;
+	}
+
+	function scenePadding() {
+		return clamp(Math.min(viewport.width, viewport.height) * 0.045, 14, 26);
+	}
+
+	function shuffle(values) {
+		for (var index = values.length - 1; index > 0; index -= 1) {
+			var swapIndex = Math.floor(random() * (index + 1));
+			var value = values[index];
+			values[index] = values[swapIndex];
+			values[swapIndex] = value;
 		}
-
-		if (viewport.width <= 600) {
-			return { count: 12, minimumRadius: 18, maximumRadius: 47 };
-		}
-
-		if (viewport.width <= 960) {
-			return { count: 14, minimumRadius: 22, maximumRadius: 58 };
-		}
-
-		return { count: 18, minimumRadius: 26, maximumRadius: 76 };
+		return values;
 	}
 
-	function elementRect(element, padding) {
-		var rect = element.getBoundingClientRect();
+	function createScene(previousBodies) {
+		var minimum = Math.min(viewport.width, viewport.height);
+		var edgePadding = scenePadding();
+		var count = sceneCount();
+		var minimumRadius = clamp(minimum * 0.038, 12, 22);
+		var maximumRadius = clamp(minimum * 0.13, 32, 70);
 
-		return {
-			left: clamp(rect.left - padding, 0, viewport.width),
-			top: clamp(rect.top - padding, 0, viewport.height),
-			right: clamp(rect.right + padding, 0, viewport.width),
-			bottom: clamp(rect.bottom + padding, 0, viewport.height)
-		};
-	}
-
-	function identityRect() {
-		return elementRect(identity, viewport.width <= 700 ? 20 : 34);
-	}
-
-	function remixRect() {
-		return elementRect(remixButton, 14);
-	}
-
-	function isOutsideProtectedArea(x, y, radius, rect) {
-		return (
-			x + radius < rect.left ||
-			x - radius > rect.right ||
-			y + radius < rect.top ||
-			y - radius > rect.bottom
-		);
-	}
-
-	function findSpawnPoint(radius, identitySafeZone, remixSafeZone) {
-		var margin = radius + 8;
-		var x = margin;
-		var y = margin;
-
-		for (var attempt = 0; attempt < 96; attempt += 1) {
-			x = margin + seededRandom() * Math.max(1, viewport.width - margin * 2);
-			y = margin + seededRandom() * Math.max(1, viewport.height - margin * 2);
-
-			if (
-				isOutsideProtectedArea(x, y, radius + 10, identitySafeZone) &&
-				isOutsideProtectedArea(x, y, radius + 10, remixSafeZone)
-			) {
-				break;
-			}
-		}
-
-		return { x: x, y: y };
-	}
-
-	function createBoundaries() {
-		var thickness = 120;
-		var common = {
-			isStatic: true,
-			render: { visible: false },
-			label: "boundary"
+		randomState = seed;
+		var sizeFactors = shuffle([0.76, 1, 0.88, 0.84, 1.08, 1.04, 0.48, 0.64, 0.54, 0.44]);
+		var patternOrder = shuffle([1, 0, 2, 3, 4, 5, 1, 3, 0, 4]);
+		var arrangementRotation = random() * Math.PI * 2;
+		var arrangementDirection = random() < 0.5 ? -1 : 1;
+		bodies = [];
+		core = {
+			x: viewport.width * (viewport.width < 520 ? 0.54 : 0.52),
+			y: viewport.height * 0.5,
+			radius: clamp(minimum * 0.115, 32, 68)
 		};
 
-		boundaries = [
-			Bodies.rectangle(viewport.width / 2, -thickness / 2, viewport.width + thickness * 2, thickness, common),
-			Bodies.rectangle(viewport.width / 2, viewport.height + thickness / 2, viewport.width + thickness * 2, thickness, common),
-			Bodies.rectangle(-thickness / 2, viewport.height / 2, thickness, viewport.height + thickness * 2, common),
-			Bodies.rectangle(viewport.width + thickness / 2, viewport.height / 2, thickness, viewport.height + thickness * 2, common)
-		];
+		for (var index = 0; index < count; index += 1) {
+			var angle = arrangementRotation + arrangementDirection * Math.PI * 2 * index / count + (random() - 0.5) * 0.34;
+			var radius = clamp(maximumRadius * sizeFactors[index] + (random() - 0.5) * 5, minimumRadius, maximumRadius * 1.08);
+			var orbitX = viewport.width * (0.29 + random() * 0.11);
+			var orbitY = viewport.height * (0.3 + random() * 0.1);
+			var anchorX = clamp(core.x + Math.cos(angle) * orbitX, radius + edgePadding, viewport.width - radius - edgePadding);
+			var anchorY = clamp(core.y + Math.sin(angle) * orbitY, radius + edgePadding, viewport.height - radius - edgePadding);
+			var spread = reducedMotion ? 0 : minimum * 0.065;
+			var previousBody = previousBodies && previousBodies[index];
+			var initialX = anchorX + (random() - 0.5) * spread;
+			var initialY = anchorY + (random() - 0.5) * spread;
 
-		Composite.add(engine.world, boundaries);
-	}
-
-	function createObstacle(rect, label) {
-		var width = Math.max(1, rect.right - rect.left);
-		var height = Math.max(1, rect.bottom - rect.top);
-
-		return Bodies.rectangle(
-			rect.left + width / 2,
-			rect.top + height / 2,
-			width,
-			height,
-			{
-				isStatic: true,
-				render: { visible: false },
-				label: label
-			}
-		);
-	}
-
-	function createOrbs() {
-		var metrics = sceneMetrics();
-		var identitySafeZone = identityRect();
-		var remixSafeZone = remixRect();
-		var colorPairs = [
-			[palette.signal, palette.chalk, palette.ink],
-			[palette.iris, palette.chalk, palette.ink],
-			[palette.ink, palette.mist, palette.signal],
-			[palette.chalk, palette.ink, palette.iris],
-			[palette.signal, palette.ink, palette.chalk]
-		];
-
-		for (var index = 0; index < metrics.count; index += 1) {
-			var radius = metrics.minimumRadius + seededRandom() * (metrics.maximumRadius - metrics.minimumRadius);
-			var point = findSpawnPoint(radius, identitySafeZone, remixSafeZone);
-			var body = Bodies.circle(point.x, point.y, radius, {
-				density: 0.0012,
-				friction: 0.05,
-				frictionAir: 0.022,
-				restitution: 0.72,
-				render: { visible: false },
-				label: "orb"
-			});
-
-			body.plugin.constellation = {
-				pattern: index % 5,
-				colors: colorPairs[index % colorPairs.length]
+			var body = {
+				x: previousBody ? previousBody.x : initialX,
+				y: previousBody ? previousBody.y : initialY,
+				vx: reducedMotion ? 0 : (random() - 0.5) * 0.8,
+				vy: reducedMotion ? 0 : (random() - 0.5) * 0.8,
+				anchorX: anchorX,
+				anchorY: anchorY,
+				radius: radius,
+				pattern: patternOrder[index],
+				angle: (random() - 0.5) * 0.9
 			};
+			constrain(body);
+			bodies.push(body);
+		}
+	}
 
-			if (!isReducedMotion) {
-				Body.setVelocity(body, {
-					x: (seededRandom() - 0.5) * 2.6,
-					y: (seededRandom() - 0.5) * 1.8
-				});
-				Body.setAngularVelocity(body, (seededRandom() - 0.5) * 0.035);
+	function constrain(body) {
+		var edgePadding = scenePadding();
+		var left = body.radius + edgePadding;
+		var right = viewport.width - body.radius - edgePadding;
+		var top = body.radius + edgePadding;
+		var bottom = viewport.height - body.radius - edgePadding;
+
+		if (body.x < left || body.x > right) {
+			body.x = clamp(body.x, left, right);
+			body.vx *= -0.42;
+		}
+		if (body.y < top || body.y > bottom) {
+			body.y = clamp(body.y, top, bottom);
+			body.vy *= -0.42;
+		}
+	}
+
+	function repel(first, second, minimumDistance, strength) {
+		var differenceX = second.x - first.x;
+		var differenceY = second.y - first.y;
+		var distance = Math.sqrt(differenceX * differenceX + differenceY * differenceY) || 0.01;
+		if (distance >= minimumDistance) return;
+
+		var force = (minimumDistance - distance) * strength;
+		var normalX = differenceX / distance;
+		var normalY = differenceY / distance;
+		first.vx -= normalX * force;
+		first.vy -= normalY * force;
+		second.vx += normalX * force;
+		second.vy += normalY * force;
+	}
+
+	function update(delta) {
+		var energy = 0;
+		var index;
+
+		for (index = 0; index < bodies.length; index += 1) {
+			var body = bodies[index];
+			if (body === dragged) continue;
+			body.vx += (body.anchorX - body.x) * 0.0017 * delta;
+			body.vy += (body.anchorY - body.y) * 0.0017 * delta;
+
+			var coreX = body.x - core.x;
+			var coreY = body.y - core.y;
+			var coreDistance = Math.sqrt(coreX * coreX + coreY * coreY) || 0.01;
+			var coreMinimum = core.radius + body.radius + 13;
+			if (coreDistance < coreMinimum) {
+				var coreForce = (coreMinimum - coreDistance) * 0.014 * delta;
+				body.vx += coreX / coreDistance * coreForce;
+				body.vy += coreY / coreDistance * coreForce;
 			}
-
-			orbBodies.push(body);
 		}
 
-		Composite.add(engine.world, orbBodies);
-	}
-
-	function drawConcentricOrb(radius, colors) {
-		for (var ring = 0; ring < 4; ring += 1) {
-			context.beginPath();
-			context.arc(0, 0, radius * (1 - ring * 0.22), 0, Math.PI * 2);
-			context.fillStyle = colors[ring % colors.length];
-			context.fill();
+		for (index = 0; index < bodies.length; index += 1) {
+			for (var comparison = index + 1; comparison < bodies.length; comparison += 1) {
+				repel(bodies[index], bodies[comparison], bodies[index].radius + bodies[comparison].radius + 9, 0.018 * delta);
+			}
 		}
-	}
 
-	function drawTargetOrb(radius, colors) {
-		context.fillStyle = colors[0];
-		context.beginPath();
-		context.arc(0, 0, radius, 0, Math.PI * 2);
-		context.fill();
-
-		context.lineWidth = Math.max(3, radius * 0.08);
-		context.strokeStyle = colors[1];
-		for (var ring = 0.58; ring >= 0.22; ring -= 0.18) {
-			context.beginPath();
-			context.arc(0, 0, radius * ring, 0, Math.PI * 2);
-			context.stroke();
+		for (index = 0; index < bodies.length; index += 1) {
+			var moving = bodies[index];
+			if (moving === dragged) {
+				moving.x = pointer.x;
+				moving.y = pointer.y;
+				constrain(moving);
+				continue;
+			}
+			moving.vx *= Math.pow(0.91, delta);
+			moving.vy *= Math.pow(0.91, delta);
+			var speed = Math.sqrt(moving.vx * moving.vx + moving.vy * moving.vy);
+			if (speed > 5.2) {
+				moving.vx = moving.vx / speed * 5.2;
+				moving.vy = moving.vy / speed * 5.2;
+			}
+			moving.x += moving.vx * delta;
+			moving.y += moving.vy * delta;
+			constrain(moving);
+			energy += Math.abs(moving.vx) + Math.abs(moving.vy);
 		}
+
+		settledFrames = !dragged && energy < 0.12 ? settledFrames + 1 : 0;
 	}
 
-	function drawOffsetOrb(radius, colors) {
-		context.fillStyle = colors[0];
+	function circle(radius) {
 		context.beginPath();
 		context.arc(0, 0, radius, 0, Math.PI * 2);
-		context.fill();
-
-		context.fillStyle = colors[1];
-		context.beginPath();
-		context.arc(radius * 0.22, -radius * 0.18, radius * 0.42, 0, Math.PI * 2);
-		context.fill();
-
-		context.fillStyle = colors[2];
-		context.beginPath();
-		context.arc(radius * 0.22, -radius * 0.18, radius * 0.13, 0, Math.PI * 2);
-		context.fill();
 	}
 
-	function drawSplitOrb(radius, colors) {
-		context.fillStyle = colors[0];
-		context.beginPath();
-		context.arc(0, 0, radius, 0, Math.PI * 2);
-		context.fill();
-
-		context.fillStyle = colors[1];
-		context.beginPath();
-		context.arc(0, 0, radius * 0.64, Math.PI * -0.5, Math.PI * 0.5);
-		context.lineTo(0, -radius * 0.64);
-		context.fill();
-
-		context.fillStyle = colors[2];
-		context.beginPath();
-		context.arc(0, 0, radius * 0.17, 0, Math.PI * 2);
-		context.fill();
-	}
-
-	function drawOrbitOrb(radius, colors) {
-		context.fillStyle = colors[0];
-		context.beginPath();
-		context.arc(0, 0, radius, 0, Math.PI * 2);
-		context.fill();
-
-		context.strokeStyle = colors[1];
-		context.lineWidth = Math.max(2, radius * 0.07);
-		context.beginPath();
-		context.arc(0, 0, radius * 0.58, 0, Math.PI * 2);
-		context.stroke();
-
-		context.fillStyle = colors[2];
-		context.beginPath();
-		context.arc(radius * 0.58, 0, radius * 0.13, 0, Math.PI * 2);
-		context.fill();
-	}
-
-	function drawOrb(body) {
-		var visual = body.plugin.constellation;
-		var radius = body.circleRadius;
+	function drawTechnicalField() {
+		var minimum = Math.min(viewport.width, viewport.height);
+		var outerRadius = Math.min(viewport.width * 0.6, viewport.height * 0.46);
+		var orbitRadii = [core.radius * 1.22, core.radius * 1.62, minimum * 0.28, minimum * 0.39, minimum * 0.52, outerRadius];
 
 		context.save();
-		context.translate(body.position.x, body.position.y);
-		context.rotate(body.angle);
+		context.translate(core.x, core.y);
+		context.lineWidth = 1;
+		context.strokeStyle = "rgba(19, 34, 32, 0.34)";
 
-		switch (visual.pattern) {
-			case 0:
-				drawConcentricOrb(radius, visual.colors);
-				break;
-			case 1:
-				drawTargetOrb(radius, visual.colors);
-				break;
-			case 2:
-				drawOffsetOrb(radius, visual.colors);
-				break;
-			case 3:
-				drawSplitOrb(radius, visual.colors);
-				break;
-			default:
-				drawOrbitOrb(radius, visual.colors);
+		for (var spoke = 0; spoke < 8; spoke += 1) {
+			var spokeAngle = Math.PI * 2 * spoke / 8;
+			context.beginPath();
+			context.moveTo(Math.cos(spokeAngle) * core.radius * 1.08, Math.sin(spokeAngle) * core.radius * 1.08);
+			context.lineTo(Math.cos(spokeAngle) * outerRadius, Math.sin(spokeAngle) * outerRadius);
+			context.stroke();
 		}
 
+		for (var ringIndex = 0; ringIndex < orbitRadii.length; ringIndex += 1) {
+			context.setLineDash(ringIndex % 2 ? [5, 6] : []);
+			context.strokeStyle = ringIndex < 2 ? "rgba(19, 34, 32, 0.27)" : "rgba(19, 34, 32, 0.52)";
+			context.beginPath();
+			context.arc(0, 0, orbitRadii[ringIndex], 0, Math.PI * 2);
+			context.stroke();
+		}
+
+		context.setLineDash([]);
+		for (var markerIndex = 0; markerIndex < 16; markerIndex += 1) {
+			var markerAngle = -Math.PI / 2 + Math.PI * 2 * markerIndex / 16;
+			var markerRadius = orbitRadii[2 + markerIndex % 4];
+			var markerX = Math.cos(markerAngle) * markerRadius;
+			var markerY = Math.sin(markerAngle) * markerRadius;
+			context.fillStyle = [palette.carbon, palette.cobalt, palette.orange, palette.yellow][markerIndex % 4];
+			if (markerIndex % 3 === 0) {
+				context.fillRect(markerX - 4, markerY - 4, 8, 8);
+			} else {
+				context.beginPath();
+				context.arc(markerX, markerY, markerIndex % 4 === 0 ? 4 : 3, 0, Math.PI * 2);
+				context.fill();
+			}
+		}
+
+		context.fillStyle = palette.carbon;
+		for (var tick = -3; tick <= 3; tick += 1) {
+			if (tick === 0) continue;
+			var tickPosition = outerRadius * tick / 3;
+			context.fillRect(tickPosition - 2, -2, 4, 4);
+			context.fillRect(-2, tickPosition - 2, 4, 4);
+		}
+		context.restore();
+
+		context.save();
+		context.strokeStyle = "rgba(19, 34, 32, 0.18)";
+		context.setLineDash([2, 3]);
+		context.beginPath();
+		context.moveTo(18, 0);
+		context.lineTo(18, viewport.height);
+		context.moveTo(viewport.width - 18, 0);
+		context.lineTo(viewport.width - 18, viewport.height);
+		context.stroke();
+		context.setLineDash([]);
+		for (var edgeY = viewport.height * 0.1; edgeY < viewport.height; edgeY += viewport.height * 0.2) {
+			context.beginPath();
+			context.moveTo(11, edgeY);
+			context.lineTo(25, edgeY);
+			context.moveTo(viewport.width - 25, edgeY);
+			context.lineTo(viewport.width - 11, edgeY);
+			context.stroke();
+		}
 		context.restore();
 	}
 
-	function renderScene() {
-		context.setTransform(viewport.pixelRatio, 0, 0, viewport.pixelRatio, 0, 0);
-		context.clearRect(0, 0, viewport.width, viewport.height);
-
-		for (var index = 0; index < orbBodies.length; index += 1) {
-			drawOrb(orbBodies[index]);
+	function drawConnectors() {
+		context.save();
+		context.lineWidth = 0.8;
+		for (var index = 0; index < bodies.length; index += 1) {
+			if (index % 3 === 1) continue;
+			context.strokeStyle = index % 2 ? "rgba(19, 34, 32, 0.28)" : "rgba(19, 34, 32, 0.42)";
+			context.setLineDash(index % 2 ? [4, 7] : []);
+			context.beginPath();
+			context.moveTo(core.x, core.y);
+			context.lineTo(bodies[index].x, bodies[index].y);
+			context.stroke();
 		}
+		context.restore();
 	}
 
-	function stopAnimation() {
-		if (animationFrame) {
-			window.cancelAnimationFrame(animationFrame);
-			animationFrame = 0;
+	function drawBody(body) {
+		var radius = body.radius;
+		context.save();
+		context.translate(body.x, body.y);
+		context.rotate(body.angle);
+		circle(radius);
+		context.clip();
+		context.fillStyle = [palette.orange, palette.yellow, palette.chalk, palette.chalk, palette.chalk, palette.orange][body.pattern];
+		context.fillRect(-radius, -radius, radius * 2, radius * 2);
+		context.lineWidth = Math.max(1.2, radius * 0.04);
+		context.strokeStyle = palette.carbon;
+		context.fillStyle = palette.carbon;
+
+		if (body.pattern === 0) {
+			context.strokeStyle = palette.chalk;
+			for (var stripe = -radius * 2; stripe <= radius * 2; stripe += Math.max(7, radius * 0.2)) {
+				context.beginPath();
+				context.moveTo(stripe, -radius);
+				context.lineTo(stripe + radius * 1.5, radius);
+				context.stroke();
+			}
+		} else if (body.pattern === 1) {
+			context.lineWidth = 0.8;
+			for (var gridLine = -radius; gridLine <= radius; gridLine += Math.max(11, radius * 0.33)) {
+				context.beginPath();
+				context.moveTo(gridLine, -radius);
+				context.lineTo(gridLine, radius);
+				context.moveTo(-radius, gridLine);
+				context.lineTo(radius, gridLine);
+				context.stroke();
+			}
+		} else if (body.pattern === 2) {
+			context.lineWidth = 1.2;
+			for (var waveY = -radius; waveY <= radius; waveY += Math.max(7, radius * 0.17)) {
+				context.beginPath();
+				context.moveTo(-radius, waveY);
+				for (var waveX = -radius; waveX < radius; waveX += radius * 0.5) {
+					context.quadraticCurveTo(waveX + radius * 0.125, waveY - radius * 0.08, waveX + radius * 0.25, waveY);
+					context.quadraticCurveTo(waveX + radius * 0.375, waveY + radius * 0.08, waveX + radius * 0.5, waveY);
+				}
+				context.stroke();
+			}
+		} else if (body.pattern === 3) {
+			for (var dotX = -radius; dotX <= radius; dotX += radius * 0.42) {
+				for (var dotY = -radius; dotY <= radius; dotY += radius * 0.42) {
+					context.beginPath();
+					context.arc(dotX, dotY, Math.max(1.5, radius * 0.055), 0, Math.PI * 2);
+					context.fill();
+				}
+			}
+		} else if (body.pattern === 4) {
+			context.fillStyle = palette.cobalt;
+			context.fillRect(-radius, -radius, radius, radius * 2);
+			context.strokeStyle = palette.cobalt;
+			context.lineWidth = 1.3;
+			for (var ring = radius * 0.16; ring < radius; ring += radius * 0.12) {
+				context.beginPath();
+				context.arc(0, 0, ring, -Math.PI / 2, Math.PI / 2);
+				context.stroke();
+			}
+		} else {
+			context.strokeStyle = palette.chalk;
+			context.lineWidth = 0.9;
+			for (var orangeGrid = -radius; orangeGrid <= radius; orangeGrid += Math.max(12, radius * 0.3)) {
+				context.beginPath();
+				context.moveTo(orangeGrid, -radius);
+				context.lineTo(orangeGrid, radius);
+				context.moveTo(-radius, orangeGrid);
+				context.lineTo(radius, orangeGrid);
+				context.stroke();
+			}
 		}
+		context.restore();
+
+		context.save();
+		context.translate(body.x, body.y);
+		circle(radius - 0.75);
+		context.lineWidth = 1.5;
+		context.strokeStyle = palette.carbon;
+		context.stroke();
+		context.restore();
+	}
+
+	function render() {
+		context.setTransform(viewport.ratio, 0, 0, viewport.ratio, 0, 0);
+		context.clearRect(0, 0, viewport.width, viewport.height);
+
+		drawTechnicalField();
+		drawConnectors();
+
+		context.save();
+		context.translate(core.x, core.y);
+		context.strokeStyle = "rgba(19, 34, 32, 0.52)";
+		context.lineWidth = 1;
+		context.fillStyle = palette.cobalt;
+		circle(core.radius);
+		context.fill();
+		context.strokeStyle = palette.chalk;
+		context.lineWidth = 2;
+		context.stroke();
+		context.fillStyle = palette.carbon;
+		context.beginPath();
+		context.arc(0, 0, Math.max(3, core.radius * 0.065), 0, Math.PI * 2);
+		context.fill();
+		context.restore();
+
+		for (var index = 0; index < bodies.length; index += 1) drawBody(bodies[index]);
 	}
 
 	function animate(time) {
-		if (document.hidden || isReducedMotion) {
-			stopAnimation();
-			return;
-		}
-
-		var elapsed = lastFrameTime ? time - lastFrameTime : 1000 / 60;
-		lastFrameTime = time;
-		Engine.update(engine, clamp(elapsed, 1000 / 120, 1000 / 60));
-		renderScene();
-
-		if (orbBodies.length && orbBodies.every(function (body) { return body.isSleeping; })) {
-			stopAnimation();
-			return;
-		}
-
-		animationFrame = window.requestAnimationFrame(animate);
+		frame = 0;
+		if (document.hidden || reducedMotion) return;
+		var delta = lastTime ? clamp((time - lastTime) / 16.667, 0.45, 1.8) : 1;
+		lastTime = time;
+		update(delta);
+		render();
+		if (settledFrames < 100 || dragged) frame = window.requestAnimationFrame(animate);
 	}
 
-	function startAnimation() {
-		if (animationFrame || document.hidden || isReducedMotion) {
-			return;
-		}
-
-		lastFrameTime = 0;
-		animationFrame = window.requestAnimationFrame(animate);
+	function start() {
+		if (frame || reducedMotion || document.hidden) return;
+		lastTime = 0;
+		frame = window.requestAnimationFrame(animate);
 	}
 
-	function removeBodies(bodies) {
-		for (var index = 0; index < bodies.length; index += 1) {
-			Composite.remove(engine.world, bodies[index]);
-		}
+	function stop() {
+		if (frame) window.cancelAnimationFrame(frame);
+		frame = 0;
 	}
 
-	function removeSceneBodies() {
-		removeBodies(orbBodies);
-		removeBodies(boundaries);
-
-		if (identityObstacle) {
-			Composite.remove(engine.world, identityObstacle);
-		}
-
-		if (remixObstacle) {
-			Composite.remove(engine.world, remixObstacle);
-		}
-
-		orbBodies = [];
-		boundaries = [];
-		identityObstacle = null;
-		remixObstacle = null;
-	}
-
-	function rebuildScene() {
-		removeSceneBodies();
-		createBoundaries();
-		identityObstacle = createObstacle(identityRect(), "identity-obstacle");
-		remixObstacle = createObstacle(remixRect(), "remix-obstacle");
-		Composite.add(engine.world, [identityObstacle, remixObstacle]);
-		createOrbs();
-		renderScene();
-		startAnimation();
-	}
-
-	function syncViewport() {
-		resizeFrame = 0;
-		viewport.width = window.innerWidth;
-		viewport.height = window.innerHeight;
-		viewport.pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-
-		canvas.width = Math.round(viewport.width * viewport.pixelRatio);
-		canvas.height = Math.round(viewport.height * viewport.pixelRatio);
+	function resize() {
+		viewport.width = Math.max(1, Math.round(stage.clientWidth));
+		viewport.height = Math.max(1, Math.round(stage.clientHeight));
+		viewport.ratio = Math.min(window.devicePixelRatio || 1, 2);
+		canvas.width = Math.round(viewport.width * viewport.ratio);
+		canvas.height = Math.round(viewport.height * viewport.ratio);
 		canvas.style.width = viewport.width + "px";
 		canvas.style.height = viewport.height + "px";
-
-		if (mouseConstraint) {
-			mouseConstraint.mouse.pixelRatio = viewport.pixelRatio;
-		}
-
-		rebuildScene();
+		createScene();
+		settledFrames = 0;
+		render();
+		start();
+		document.documentElement.classList.add("canvas-ready");
 	}
 
-	function scheduleViewportSync() {
-		if (!resizeFrame) {
-			resizeFrame = window.requestAnimationFrame(syncViewport);
-		}
-	}
-
-	function configureMouseConstraint() {
-		var mouse = Mouse.create(canvas);
-		mouse.pixelRatio = viewport.pixelRatio;
-		mouseConstraint = MouseConstraint.create(engine, {
-			mouse: mouse,
-			constraint: {
-				stiffness: 0.18,
-				damping: 0.16,
-				render: { visible: false }
-			}
-		});
-
-		Composite.add(engine.world, mouseConstraint);
-		Events.on(mouseConstraint, "startdrag", function () {
-			document.body.classList.add("is-dragging");
-		});
-		Events.on(mouseConstraint, "enddrag", function () {
-			document.body.classList.remove("is-dragging");
+	function scheduleResize() {
+		if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+		resizeFrame = window.requestAnimationFrame(function () {
+			resizeFrame = 0;
+			stop();
+			resize();
 		});
 	}
 
-	function handleRemix() {
-		seed = (seed + 1009) | 0;
-		rebuildScene();
-		remixStatus.textContent = "Constellation remixed.";
+	function pointFromEvent(event) {
+		var rectangle = canvas.getBoundingClientRect();
+		return { x: event.clientX - rectangle.left, y: event.clientY - rectangle.top };
 	}
 
-	function handleVisibilityChange() {
-		if (document.hidden) {
-			stopAnimation();
-		} else {
-			startAnimation();
+	function bodyAt(point) {
+		for (var index = bodies.length - 1; index >= 0; index -= 1) {
+			var body = bodies[index];
+			var x = point.x - body.x;
+			var y = point.y - body.y;
+			if (x * x + y * y <= Math.pow(body.radius + 8, 2)) return body;
 		}
+		return null;
 	}
 
-	function handleMotionPreference(event) {
-		isReducedMotion = event.matches;
-		document.documentElement.classList.toggle("reduced-motion", isReducedMotion);
-		stopAnimation();
-		rebuildScene();
+	canvas.addEventListener("pointerdown", function (event) {
+		if (reducedMotion) return;
+		var point = pointFromEvent(event);
+		dragged = bodyAt(point);
+		if (!dragged) return;
+		pointer.x = pointer.previousX = point.x;
+		pointer.y = pointer.previousY = point.y;
+		canvas.setPointerCapture(event.pointerId);
+		document.body.classList.add("is-dragging");
+		settledFrames = 0;
+		start();
+		event.preventDefault();
+	});
+
+	canvas.addEventListener("pointermove", function (event) {
+		if (!dragged) return;
+		var point = pointFromEvent(event);
+		pointer.previousX = pointer.x;
+		pointer.previousY = pointer.y;
+		pointer.x = point.x;
+		pointer.y = point.y;
+		dragged.vx = (pointer.x - pointer.previousX) * 0.45;
+		dragged.vy = (pointer.y - pointer.previousY) * 0.45;
+		event.preventDefault();
+	});
+
+	function release(event) {
+		if (!dragged) return;
+		dragged = null;
+		document.body.classList.remove("is-dragging");
+		if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+		start();
 	}
 
-	document.documentElement.classList.toggle("reduced-motion", isReducedMotion);
-	configureMouseConstraint();
-	syncViewport();
+	canvas.addEventListener("pointerup", release);
+	canvas.addEventListener("pointercancel", release);
 
-	remixButton.addEventListener("click", handleRemix);
-	canvas.addEventListener("pointerdown", startAnimation, { passive: true });
-	document.addEventListener("visibilitychange", handleVisibilityChange);
-	window.addEventListener("resize", scheduleViewportSync, { passive: true });
-	new ResizeObserver(scheduleViewportSync).observe(identity);
+	button.addEventListener("click", function () {
+		seed += 1009;
+		stop();
+		createScene(bodies);
+		settledFrames = 0;
+		render();
+		start();
+		status.textContent = "System forces rebalanced.";
+	});
 
-	if (motionQuery.addEventListener) {
-		motionQuery.addEventListener("change", handleMotionPreference);
-	} else {
-		motionQuery.addListener(handleMotionPreference);
+	document.addEventListener("visibilitychange", function () {
+		if (document.hidden) stop();
+		else {
+			settledFrames = 0;
+			start();
+		}
+	});
+
+	function motionChanged(event) {
+		reducedMotion = event.matches;
+		document.documentElement.classList.toggle("reduced-motion", reducedMotion);
+		stop();
+		createScene();
+		render();
+		if (!reducedMotion) start();
 	}
-})();
+
+	if (motionQuery.addEventListener) motionQuery.addEventListener("change", motionChanged);
+	else motionQuery.addListener(motionChanged);
+	document.documentElement.classList.toggle("reduced-motion", reducedMotion);
+
+	if ("ResizeObserver" in window) new ResizeObserver(scheduleResize).observe(stage);
+	else window.addEventListener("resize", scheduleResize);
+	scheduleResize();
+}());
